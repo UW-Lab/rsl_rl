@@ -12,6 +12,7 @@ from tensordict import TensorDict
 
 from rsl_rl.algorithms.ppo import PPO
 from rsl_rl.models import MLPModel
+from rsl_rl.modules import EmpiricalNormalization
 from rsl_rl.storage import RolloutStorage
 from tests.conftest import make_obs
 
@@ -63,6 +64,66 @@ def _build_ppo(**overrides: object) -> tuple[PPO, TensorDict]:
     defaults.update(overrides)
     ppo = PPO(actor, critic, storage, **defaults)
     return ppo, obs
+
+
+def _build_normalized_ppo_for_sync(distributed_obs_normalization: bool = False, multi_gpu: bool = False) -> PPO:
+    """Build PPO with direct and nested observation normalizers."""
+    obs = make_obs(NUM_ENVS, OBS_DIM)
+    obs_groups = {"actor": ["policy"], "critic": ["policy"]}
+    actor = _make_actor(obs, obs_groups, NUM_ACTIONS, obs_normalization=True)
+    critic = _make_critic(obs, obs_groups, obs_normalization=True)
+    # Stand in for per-encoded-group normalizers to verify recursive discovery,
+    # without coupling this algorithm test to a specific encoder model.
+    actor.nested_normalizers = torch.nn.ModuleDict({"encoded": EmpiricalNormalization(3)})
+    critic.nested_normalizers = torch.nn.ModuleDict({"encoded": EmpiricalNormalization(5)})
+    storage = RolloutStorage("rl", NUM_ENVS, NUM_STEPS, obs, [NUM_ACTIONS])
+    multi_gpu_cfg = {"global_rank": 0, "local_rank": 0, "world_size": 2} if multi_gpu else None
+    return PPO(
+        actor,
+        critic,
+        storage,
+        schedule="fixed",
+        distributed_obs_normalization=distributed_obs_normalization,
+        multi_gpu_cfg=multi_gpu_cfg,
+    )
+
+
+def _normalizers(ppo: PPO) -> list[EmpiricalNormalization]:
+    """Return every actor/critic empirical normalizer."""
+    return [
+        module
+        for model in (ppo._raw_actor, ppo._raw_critic)
+        for module in model.modules()
+        if isinstance(module, EmpiricalNormalization)
+    ]
+
+
+class TestDistributedObservationNormalization:
+    """Tests for PPO's default-off distributed-normalizer plumbing."""
+
+    def test_defaults_off_for_distributed_ppo(self) -> None:
+        """A distributed PPO must retain rank-local behavior unless explicitly enabled."""
+        ppo = _build_normalized_ppo_for_sync(multi_gpu=True)
+        assert len(_normalizers(ppo)) == 4
+        assert ppo.distributed_obs_normalization is False
+        assert all(not normalizer._distributed_sync_enabled for normalizer in _normalizers(ppo))
+
+    def test_explicit_flag_is_noop_on_single_rank(self) -> None:
+        """Requesting synchronization on one rank must preserve ordinary local updates."""
+        ppo = _build_normalized_ppo_for_sync(distributed_obs_normalization=True, multi_gpu=False)
+        assert ppo.distributed_obs_normalization is False
+        assert all(not normalizer._distributed_sync_enabled for normalizer in _normalizers(ppo))
+
+        obs = make_obs(NUM_ENVS, OBS_DIM)
+        ppo.actor.update_normalization(obs)
+        assert ppo.actor.obs_normalizer.count.item() == NUM_ENVS
+
+    def test_explicit_flag_recursively_enables_all_normalizers(self) -> None:
+        """Direct and encoder-like nested normalizers must all synchronize."""
+        ppo = _build_normalized_ppo_for_sync(distributed_obs_normalization=True, multi_gpu=True)
+        assert ppo.distributed_obs_normalization is True
+        assert len(_normalizers(ppo)) == 4
+        assert all(normalizer._distributed_sync_enabled for normalizer in _normalizers(ppo))
 
 
 class TestGAEComputation:

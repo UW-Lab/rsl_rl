@@ -32,6 +32,9 @@ class EmpiricalNormalization(nn.Module):
         self.register_buffer("_var", torch.ones(shape).unsqueeze(0))
         self.register_buffer("_std", torch.ones(shape).unsqueeze(0))
         self.register_buffer("count", torch.tensor(0, dtype=torch.long))
+        # Runtime-only switch configured by PPO. Keeping it as a plain attribute
+        # preserves the checkpoint state-dict schema exactly.
+        self._distributed_sync_enabled = False
 
     @property
     def mean(self) -> torch.Tensor:
@@ -55,6 +58,10 @@ class EmpiricalNormalization(nn.Module):
         if self.until is not None and self.count >= self.until:
             return
 
+        if self._distributed_sync_enabled:
+            self._distributed_update(x)
+            return
+
         count_x = x.shape[0]
         self.count += count_x
         rate = count_x / self.count
@@ -64,6 +71,63 @@ class EmpiricalNormalization(nn.Module):
         self._mean += rate * delta_mean
         self._var += rate * (var_x - self._var + delta_mean * (mean_x - self._mean))
         self._std = torch.sqrt(self._var)
+
+    @torch.jit.unused
+    def set_distributed_sync(self, enabled: bool = True) -> None:
+        """Enable per-update aggregation of input moments across distributed ranks.
+
+        This is intentionally runtime-only: the running moments remain ordinary
+        persistent buffers, while the synchronization policy is supplied by the
+        active training configuration.
+        """
+        self._distributed_sync_enabled = enabled
+
+    @torch.jit.unused
+    def _distributed_update(self, x: torch.Tensor) -> None:
+        """Merge one globally aggregated input batch into the shared running state."""
+        if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+            raise RuntimeError("Distributed EmpiricalNormalization requires an initialized process group.")
+
+        # Accumulate sufficient statistics in float64. One packed collective per
+        # normalizer keeps ordering explicit and avoids cancellation at large
+        # distributed batch sizes.
+        x_64 = x.detach().to(dtype=torch.float64)
+        local_count = torch.tensor([x.shape[0]], device=x.device, dtype=torch.float64)
+        local_sum = x_64.sum(dim=0, keepdim=True).reshape(-1)
+        local_sq_sum = x_64.square().sum(dim=0, keepdim=True).reshape(-1)
+        moments = torch.cat((local_count, local_sum, local_sq_sum))
+        torch.distributed.all_reduce(moments, op=torch.distributed.ReduceOp.SUM)
+        # Check only after the collective so every rank follows the same
+        # ordering and fails together. Raising before all_reduce on the rank
+        # that first sees Inf/NaN would strand its peers inside NCCL.
+        if not torch.isfinite(moments).all():
+            raise FloatingPointError("Non-finite observation moments detected during distributed normalization.")
+
+        count_x = moments[0]
+        if count_x <= 0:
+            return
+        num_features = self._mean.numel()
+        mean_x = (moments[1 : 1 + num_features] / count_x).reshape_as(self._mean)
+        second_moment_x = (moments[1 + num_features :] / count_x).reshape_as(self._mean)
+        var_x = (second_moment_x - mean_x.square()).clamp_min_(0.0)
+        self._merge_moments(count_x, mean_x, var_x)
+
+    @torch.jit.unused
+    def _merge_moments(self, count_x: torch.Tensor, mean_x: torch.Tensor, var_x: torch.Tensor) -> None:
+        """Chan-merge population moments into the existing running moments."""
+        count = self.count.to(dtype=torch.float64)
+        new_count = count + count_x
+        rate = count_x / new_count
+        mean = self._mean.to(dtype=torch.float64)
+        var = self._var.to(dtype=torch.float64)
+        delta_mean = mean_x - mean
+        new_mean = mean + rate * delta_mean
+        new_var = var + rate * (var_x - var + delta_mean * (mean_x - new_mean))
+
+        self.count.add_(count_x.to(dtype=self.count.dtype))
+        self._mean.copy_(new_mean.to(dtype=self._mean.dtype))
+        self._var.copy_(new_var.clamp_min_(0.0).to(dtype=self._var.dtype))
+        self._std.copy_(torch.sqrt(self._var))
 
     @torch.jit.unused
     def inverse(self, y: torch.Tensor) -> torch.Tensor:

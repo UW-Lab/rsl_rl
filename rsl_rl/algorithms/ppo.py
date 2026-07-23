@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+from collections.abc import Iterable
 from itertools import chain
 from tensordict import TensorDict
 
 from rsl_rl.env import VecEnv
 from rsl_rl.extensions import RandomNetworkDistillation, Symmetry, resolve_rnd_config, resolve_symmetry_config
 from rsl_rl.models import MLPModel
+from rsl_rl.modules import EmpiricalNormalization
 from rsl_rl.storage import RolloutStorage
 from rsl_rl.utils import (
     GradientNoiseScaleTracker,
@@ -56,6 +58,7 @@ class PPO:
         schedule: str = "adaptive",
         desired_kl: float = 0.01,
         normalize_advantage_per_mini_batch: bool = False,
+        distributed_obs_normalization: bool = False,
         device: str = "cpu",
         # RND parameters
         rnd_cfg: dict | None = None,
@@ -95,6 +98,14 @@ class PPO:
         # simply alias ``self.actor`` / ``self.critic``.
         self._raw_actor = self.actor
         self._raw_critic = self.critic
+
+        # Observation-normalizer buffers are not gradients, so the ordinary
+        # parameter reduction does not keep them aligned after the initial
+        # broadcast. Opt in to exact per-step global moment aggregation for
+        # every actor/critic EmpiricalNormalization descendant.
+        self.distributed_obs_normalization = distributed_obs_normalization and self.is_multi_gpu
+        if self.distributed_obs_normalization:
+            self._enable_distributed_obs_normalization()
 
         # Create the optimizer
         self.optimizer = resolve_optimizer(optimizer)(
@@ -467,6 +478,13 @@ class PPO:
         """Get the policy model."""
         return self._raw_actor
 
+    def _enable_distributed_obs_normalization(self) -> None:
+        """Enable global moment aggregation on all actor/critic normalizers."""
+        for model in (self._raw_actor, self._raw_critic):
+            for module in model.modules():
+                if isinstance(module, EmpiricalNormalization):
+                    module.set_distributed_sync(True)
+
     def compile(self, mode: str | None = None) -> None:
         """Compile actor and critic with ``torch.compile``.
 
@@ -594,7 +612,7 @@ class PPO:
         return list(chain(self.actor.parameters(), self.critic.parameters()))
 
     @staticmethod
-    def _grad_norm_sq(params) -> torch.Tensor:
+    def _grad_norm_sq(params: Iterable[torch.nn.Parameter]) -> torch.Tensor:
         """Return ``sum_p |p.grad|^2`` as a scalar tensor on the gradient's device.
 
         Skips parameters with ``p.grad is None``. Used by T-1's per-minibatch grad-norm
