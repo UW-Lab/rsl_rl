@@ -111,7 +111,7 @@ class Logger:
 
             # Buffer per-iteration log images (e.g. curriculum heatmap). Latest emission per
             # tag wins; the buffer is flushed and cleared in :meth:`log`.
-            if "log_images" in extras and extras["log_images"]:
+            if extras.get("log_images"):
                 self.log_images_buffer.update(extras["log_images"])
 
             # Update rewards and episode length
@@ -147,6 +147,7 @@ class Logger:
         action_std: torch.Tensor,
         rnd_weight: float | None,
         policy_metrics: dict[str, float] | None = None,
+        rank_diagnostics: dict[str, float] | None = None,
         print_minimal: bool = False,
         width: int = 80,
         pad: int = 40,
@@ -204,6 +205,16 @@ class Logger:
             if policy_metrics:
                 for key, value in policy_metrics.items():
                     self.writer.add_scalar(f"Policy/{key}", value, it)
+
+            # Explicit per-rank diagnostics are already fully namespaced.
+            if rank_diagnostics:
+                if self.logger_type == "wandb":
+                    # Keep one TensorBoard scalar per channel while sending the
+                    # large rank payload to W&B in one history update.
+                    self.writer.add_scalars_batch(rank_diagnostics, it)  # type: ignore
+                else:
+                    for key, value in rank_diagnostics.items():
+                        self.writer.add_scalar(key, value, it)
 
             # Log performance
             fps = int(collection_size / (collect_time + learn_time))

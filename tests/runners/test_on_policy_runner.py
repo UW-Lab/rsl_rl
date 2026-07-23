@@ -15,11 +15,16 @@ import tempfile
 import torch
 import torch.multiprocessing as mp
 from tensordict import TensorDict
+from types import SimpleNamespace
 
 import pytest
 
 from rsl_rl.env import VecEnv
 from rsl_rl.runners import OnPolicyRunner
+from rsl_rl.runners.on_policy_runner import (
+    _RANK_DIAGNOSTIC_ROLLOUT_EXTREMA_KEYS,
+    _RANK_DIAGNOSTIC_ROLLOUT_MAX_KEYS,
+)
 from tests.algorithms.test_ppo import _build_ppo
 
 NUM_ENVS = 4
@@ -177,6 +182,102 @@ class TestLearnLoop:
         runner = _build_runner()
         runner.learn(num_learning_iterations=3)
         assert runner.current_learning_iteration == 2
+
+
+class TestRankDiagnostics:
+    """Tests for opt-in per-rank rollout diagnostics."""
+
+    def test_rank_diagnostics_are_safe_without_isaac_or_cuda(self) -> None:
+        """The optional diagnostics should degrade to fixed-shape NaNs on a CPU dummy env."""
+        cfg = _make_train_cfg("mlp")
+        cfg["rank_diagnostics"] = True
+        runner = OnPolicyRunner(DummyEnv(), cfg, log_dir=None, device="cpu")
+
+        snapshot = runner._local_physics_cuda_diagnostics()
+        assert snapshot.shape == (len(_RANK_DIAGNOSTIC_ROLLOUT_EXTREMA_KEYS),)
+        by_name = dict(zip(_RANK_DIAGNOSTIC_ROLLOUT_EXTREMA_KEYS, snapshot.tolist()))
+        assert by_name["physx_query_ok_rollout_min"] == 0.0
+        assert by_name["cuda_query_ok_rollout_min"] == 0.0
+        assert math.isnan(by_name["cuda_free_mib_rollout_min"])
+
+        # Also exercises the CPU-safe identity fields and fixed-shape gather.
+        runner.learn(num_learning_iterations=1)
+
+    def test_rollout_extrema_use_max_for_usage_and_min_for_health(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Usage peaks should grow while query health and free memory retain minima."""
+        runner = _build_runner()
+        split = len(_RANK_DIAGNOSTIC_ROLLOUT_MAX_KEYS)
+        first = torch.full((len(_RANK_DIAGNOSTIC_ROLLOUT_EXTREMA_KEYS),), float("nan"))
+        second = first.clone()
+        first[0], second[0] = 2.0, 5.0
+        first[split], second[split] = 1.0, 0.0
+        first[split + 1], second[split + 1] = 1.0, 1.0
+        first[split + 2], second[split + 2] = 100.0, 80.0
+        snapshots = iter((first, second))
+        monkeypatch.setattr(runner, "_local_physics_cuda_diagnostics", lambda: next(snapshots))
+
+        extrema = runner._new_rank_diagnostic_extrema()
+        runner._accumulate_rank_diagnostic_extrema(extrema)
+        runner._accumulate_rank_diagnostic_extrema(extrema)
+
+        assert extrema[0].item() == 5.0
+        assert extrema[split].item() == 0.0
+        assert extrema[split + 1].item() == 1.0
+        assert extrema[split + 2].item() == 80.0
+        assert torch.isnan(extrema[1])
+
+    def test_termination_event_diagnostics_are_exact_rollout_deltas(self) -> None:
+        """Cumulative reset counters should yield per-rollout rates once and only once."""
+        env = DummyEnv()
+        reset = SimpleNamespace(
+            names=["grasp_asset_in_air", "start_assembled", "start_grasped"],
+            termination_event_names=("success", "time_out", "rod_oob", "abnormal"),
+            termination_event_episode_count=torch.zeros((), dtype=torch.long),
+            termination_event_counts=torch.zeros(4, dtype=torch.long),
+            termination_event_episode_counts_by_tag=torch.zeros(3, dtype=torch.long),
+            termination_event_counts_by_tag=torch.zeros((3, 4), dtype=torch.long),
+        )
+        env.event_manager = SimpleNamespace(
+            get_term_cfg=lambda name: SimpleNamespace(func=reset) if name == "reset_positioning" else None
+        )
+        runner = OnPolicyRunner(env, _make_train_cfg("mlp"), log_dir=None, device="cpu")
+
+        start = runner._local_termination_event_counter_snapshot()
+        reset.termination_event_episode_count += 10
+        reset.termination_event_counts += torch.tensor([4, 3, 2, 1])
+        reset.termination_event_episode_counts_by_tag += torch.tensor([2, 5, 3])
+        reset.termination_event_counts_by_tag += torch.tensor([
+            [2, 0, 0, 0],
+            [1, 3, 1, 1],
+            [1, 0, 1, 0],
+        ])
+
+        metrics = runner._local_termination_event_rollout_diagnostics(start)
+        assert metrics["TerminationEvents/rollout/episodes/count"].item() == 10
+        assert metrics["TerminationEvents/rollout/success/count"].item() == 4
+        assert metrics["TerminationEvents/rollout/success/rate"].item() == pytest.approx(0.4)
+        assert metrics["TerminationEvents/rollout/tag/start_assembled/episodes/count"].item() == 5
+        assert metrics["TerminationEvents/rollout/tag/start_assembled/time_out/count"].item() == 3
+        assert metrics["TerminationEvents/rollout/tag/start_assembled/time_out/rate"].item() == pytest.approx(0.6)
+        gathered = runner._gather_rank_diagnostics({}, {}, termination_event_counter_start=start)
+        assert gathered is not None
+        assert gathered[
+            "RankDiagnostics/rank_00/TerminationEvents/rollout/tag/start_assembled/time_out/rate"
+        ] == pytest.approx(0.6)
+
+        # A new start snapshot drains nothing; unchanged cumulative counters
+        # produce zero new counts and undefined (NaN) zero-denominator rates.
+        next_start = runner._local_termination_event_counter_snapshot()
+        no_new_events = runner._local_termination_event_rollout_diagnostics(next_start)
+        assert no_new_events["TerminationEvents/rollout/episodes/count"].item() == 0
+        assert no_new_events["TerminationEvents/rollout/success/count"].item() == 0
+        assert math.isnan(no_new_events["TerminationEvents/rollout/success/rate"].item())
+
+        # Schema is fixed even when no factory reset accumulator is available.
+        no_factory_runner = _build_runner()
+        missing = no_factory_runner._local_termination_event_rollout_diagnostics(None)
+        assert missing.keys() == metrics.keys()
+        assert all(torch.isnan(value) for value in missing.values())
 
 
 class TestSaveLoad:
@@ -347,8 +448,7 @@ class TestSaveLoad:
             runner.learn(num_learning_iterations=2)
             current = runner.alg.optimizer.state_dict()["state"]
             assert any(
-                isinstance(saved[pid][field], torch.Tensor)
-                and not torch.equal(saved[pid][field], current[pid][field])
+                isinstance(saved[pid][field], torch.Tensor) and not torch.equal(saved[pid][field], current[pid][field])
                 for pid in saved
                 for field in ("exp_avg", "exp_avg_sq")
             ), "Optimizer moments should change after additional training"

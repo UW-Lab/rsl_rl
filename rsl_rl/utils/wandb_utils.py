@@ -10,6 +10,7 @@ import os
 import pathlib
 from dataclasses import asdict
 from torch.utils.tensorboard import SummaryWriter
+from typing import Any
 
 try:
     import wandb
@@ -88,10 +89,32 @@ class WandbSummaryWriter(SummaryWriter):
         )
         wandb.log({tag: scalar_value}, step=global_step)
 
+    def add_scalars_batch(
+        self,
+        tag_scalar_dict: dict[str, float],
+        global_step: int | None = None,
+        walltime: float | None = None,
+        new_style: bool = False,
+    ) -> None:
+        """Log independent scalars to TensorBoard and one batched W&B row."""
+        if not tag_scalar_dict:
+            return
+        for tag, scalar_value in tag_scalar_dict.items():
+            # Bypass this class's single-scalar override so W&B receives one
+            # payload below while TensorBoard retains the exact scalar schema.
+            super().add_scalar(
+                tag,
+                scalar_value,
+                global_step=global_step,
+                walltime=walltime,
+                new_style=new_style,
+            )
+        wandb.log(dict(tag_scalar_dict), step=global_step)
+
     def add_image(
         self,
         tag: str,
-        img_tensor,
+        img_tensor: Any,
         global_step: int | None = None,
         walltime: float | None = None,
         dataformats: str = "CHW",
