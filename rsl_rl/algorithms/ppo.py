@@ -486,6 +486,8 @@ class PPO:
             self.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
             if "learning_rate" in loaded_dict:
                 self.learning_rate = loaded_dict["learning_rate"]
+            else:
+                self.learning_rate = self.optimizer.param_groups[0]["lr"]
         if load_cfg.get("rnd") and self.rnd:
             self.rnd.load_state_dict(loaded_dict["rnd_state_dict"], strict=strict)
             self.rnd.optimizer.load_state_dict(loaded_dict["rnd_optimizer_state_dict"])
