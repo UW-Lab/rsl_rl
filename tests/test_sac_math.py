@@ -4,7 +4,10 @@
 # SPDX-License-Identifier: BSD-3-Clause
 import torch
 from tensordict import TensorDict
+
+from rsl_rl.algorithms import SAC
 from rsl_rl.models import SACActorModel, SACCriticModel
+from rsl_rl.storage import ReplayBuffer
 
 OBS_GROUPS = {"actor": ["policy"], "critic": ["policy"]}
 
@@ -69,3 +72,50 @@ def test_actor_output_entropy_is_tensor():
     ent = actor.output_entropy
     assert isinstance(ent, torch.Tensor)
     _ = ent.mean().item()
+
+
+def _mk_sac(q_aggregation="min"):
+    obs = _obs(n=4, dim=5)
+    actor = SACActorModel(obs, OBS_GROUPS, "actor", output_dim=3, hidden_dims=[16, 16])
+    critic = SACCriticModel(obs, OBS_GROUPS, "critic", output_dim=1, num_actions=3, hidden_dims=[16, 16])
+    rb = ReplayBuffer(
+        num_envs=4, num_transitions_per_env=1, obs=obs, actions_shape=[3],
+        device="cpu", buffer_size=64, n_steps=1, gamma=0.99,
+    )
+    return SAC(actor, critic, rb, device="cpu", q_aggregation=q_aggregation)
+
+
+def test_combine_q_min_and_avg():
+    q1 = torch.tensor([[1.0], [3.0]])
+    q2 = torch.tensor([[2.0], [1.0]])
+    alg_min = _mk_sac("min")
+    assert torch.allclose(alg_min._combine_q(q1, q2), torch.tensor([[1.0], [1.0]]))
+    alg_avg = _mk_sac("avg")
+    assert torch.allclose(alg_avg._combine_q(q1, q2), torch.tensor([[1.5], [2.0]]))
+
+
+def test_combine_q_unknown_raises():
+    import pytest
+    alg = _mk_sac("min")
+    alg.q_aggregation = "bogus"
+    with pytest.raises(ValueError):
+        alg._combine_q(torch.zeros(1, 1), torch.zeros(1, 1))
+
+
+def test_bootstrap_mask_values_and_guard():
+    bootstrap = torch.tensor([[0.], [1.], [0.]])
+    dones = torch.tensor([[0.], [1.], [1.]])
+    mask = bootstrap + 1 - dones
+    assert torch.allclose(mask, torch.tensor([[1.], [1.], [0.]]))
+    bad = torch.tensor([[1.]]) + 1 - torch.tensor([[0.]])
+    assert torch.any(bad > 1)
+
+
+def test_nstep_target_formula():
+    gamma, n = 0.9, torch.tensor([[2]])
+    reward = torch.tensor([[1.5]])
+    q_next = torch.tensor([[10.0]])
+    mask = torch.tensor([[1.0]])
+    discount = torch.pow(torch.tensor(gamma), n.to(torch.float32))
+    target = reward + discount * mask * q_next
+    assert torch.allclose(target, torch.tensor([[1.5 + 0.81 * 10.0]]))
