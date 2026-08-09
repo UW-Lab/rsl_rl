@@ -48,3 +48,24 @@ def test_actor_layer_norm_true_raises():
     obs = _obs()
     with pytest.raises(NotImplementedError):
         SACActorModel(obs, OBS_GROUPS, "actor", output_dim=4, hidden_dims=[32, 32], layer_norm=True)
+
+
+def test_actor_output_std_is_tensor():
+    obs = _obs()
+    actor = SACActorModel(obs, OBS_GROUPS, "actor", output_dim=4, hidden_dims=[32, 32])
+    # populate self.distribution via a forward pass
+    actor(obs, stochastic_output=True)
+    std = actor.output_std
+    assert isinstance(std, torch.Tensor)
+    assert std.shape[-1] == 4
+    # Logger does action_std.mean().item(); must not raise:
+    _ = std.mean().item()
+
+
+def test_actor_output_entropy_is_tensor():
+    obs = _obs()
+    actor = SACActorModel(obs, OBS_GROUPS, "actor", output_dim=4, hidden_dims=[32, 32])
+    actor(obs, stochastic_output=True)
+    ent = actor.output_entropy
+    assert isinstance(ent, torch.Tensor)
+    _ = ent.mean().item()

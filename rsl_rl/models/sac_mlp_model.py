@@ -116,6 +116,14 @@ class SACActorModel(MLPModel):
     def _squash_and_scale(self, x_t: torch.Tensor) -> torch.Tensor:
         return self.action_range * torch.tanh(x_t) + self.action_bias
 
+    @property
+    def output_std(self) -> torch.Tensor:
+        return self.distribution.stddev
+
+    @property
+    def output_entropy(self) -> torch.Tensor:
+        return self.distribution.entropy().sum(dim=-1)
+
     def as_jit(self) -> nn.Module:
         return _TorchSACActorModel(self)
 
