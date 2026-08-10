@@ -82,7 +82,7 @@ def _mk_sac(q_aggregation="min"):
         num_envs=4, num_transitions_per_env=1, obs=obs, actions_shape=[3],
         device="cpu", buffer_size=64, n_steps=1, gamma=0.99,
     )
-    return SAC(actor, critic, rb, device="cpu", q_aggregation=q_aggregation)
+    return SAC(actor, critic, rb, device="cpu", gamma=0.99, q_aggregation=q_aggregation)
 
 
 def test_combine_q_min_and_avg():
@@ -119,3 +119,61 @@ def test_nstep_target_formula():
     discount = torch.pow(torch.tensor(gamma), n.to(torch.float32))
     target = reward + discount * mask * q_next
     assert torch.allclose(target, torch.tensor([[1.5 + 0.81 * 10.0]]))
+
+
+def test_gamma_mismatch_raises():
+    import pytest
+    obs = _obs(n=4, dim=5)
+    actor = SACActorModel(obs, OBS_GROUPS, "actor", output_dim=3, hidden_dims=[16, 16])
+    critic = SACCriticModel(obs, OBS_GROUPS, "critic", output_dim=1, num_actions=3, hidden_dims=[16, 16])
+    rb = ReplayBuffer(num_envs=4, num_transitions_per_env=1, obs=obs, actions_shape=[3],
+                      device="cpu", buffer_size=64, n_steps=1, gamma=0.99)
+    with pytest.raises(ValueError):
+        SAC(actor, critic, rb, device="cpu", gamma=0.95)  # mismatch vs buffer 0.99
+
+
+def test_process_env_step_timeout_requires_obs():
+    import pytest
+    import torch
+    from tensordict import TensorDict
+    alg = _mk_sac("min")
+    obs = _obs(n=4, dim=5)
+    alg.act(obs)  # sets transition.observations/actions
+    next_obs = _obs(n=4, dim=5)
+    dones = torch.zeros(4, 1)
+    # timeout active but no time_outs_obs -> must raise
+    extras = {"time_outs": torch.tensor([[0], [1], [0], [0]])}
+    with pytest.raises(ValueError):
+        alg.process_env_step(next_obs, torch.zeros(4, 1), dones, extras)
+
+
+def test_process_env_step_timeout_substitution_multidim():
+    import torch
+    from tensordict import TensorDict
+    # obs with a 3D leaf [N, H, W] to exercise general mask broadcast
+    n = 4
+    groups = {"actor": ["policy"], "critic": ["policy"]}
+    def mk3d():
+        return TensorDict(
+            {"policy": torch.zeros(n, 5), "height_scan": torch.zeros(n, 2, 3)}, batch_size=[n]
+        )
+    obs = mk3d()
+    actor = SACActorModel(obs, groups, "actor", output_dim=3, hidden_dims=[16, 16])
+    critic = SACCriticModel(obs, groups, "critic", output_dim=1, num_actions=3, hidden_dims=[16, 16])
+    rb = ReplayBuffer(num_envs=n, num_transitions_per_env=1, obs=obs, actions_shape=[3],
+                      device="cpu", buffer_size=64, n_steps=1, gamma=0.99)
+    alg = SAC(actor, critic, rb, device="cpu", gamma=0.99)
+    alg.act(obs)
+    next_obs = TensorDict(
+        {"policy": torch.ones(n, 5), "height_scan": torch.ones(n, 2, 3)}, batch_size=[n]
+    )  # post-reset = 1s
+    term_obs = TensorDict(
+        {"policy": torch.full((n, 5), 7.0), "height_scan": torch.full((n, 2, 3), 7.0)}, batch_size=[n]
+    )  # terminal = 7s
+    dones = torch.tensor([[0.0], [1.0], [0.0], [0.0]])
+    extras = {"time_outs": torch.tensor([[0], [1], [0], [0]]), "time_outs_obs": term_obs}
+    alg.process_env_step(next_obs, torch.zeros(n, 1), dones, extras)
+    # env 1 (timeout) must have terminal obs (7) stored as next_obs; others keep post-reset (1)
+    stored = rb.next_observations["height_scan"][:, rb.step - 1]  # last written slot
+    assert torch.allclose(stored[1], torch.full((2, 3), 7.0))
+    assert torch.allclose(stored[0], torch.ones(2, 3))

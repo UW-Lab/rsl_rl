@@ -139,6 +139,11 @@ class SAC:
         self.num_mini_batches = num_mini_batches
         self.mini_batch_size = mini_batch_size
         self.gamma = gamma
+        if abs(float(self.replay_buffer.gamma) - float(self.gamma)) > 1e-12:
+            raise ValueError(
+                f"SAC gamma ({self.gamma}) and replay buffer gamma ({self.replay_buffer.gamma}) must match; "
+                "they jointly define the n-step return target."
+            )
         self.tau = tau
         self.auto_alpha = auto_alpha
         self.alpha = alpha
@@ -197,17 +202,33 @@ class SAC:
         self, next_obs: TensorDict, rew: torch.Tensor, dones: torch.Tensor, extras: dict
     ) -> None:
         """Process a single environment step and store transition in replay buffer."""
-        if "time_outs" in extras and "time_outs_obs" in extras:
+        # Determine timeout flags for this step (bootstrap through truncations, not true terminals).
+        if "time_outs" in extras:
             time_outs = extras["time_outs"].int().to(self.device)
-            time_outs_obs = extras.get("time_outs_obs", None)
-            true_next_obs = {}
-            mask = time_outs.squeeze(-1).bool()
-
-            for key in time_outs_obs.keys():
-                true_next_obs[key] = torch.where(mask[:, None], time_outs_obs[key], next_obs[key])
-            true_next_obs = TensorDict(true_next_obs, batch_size=next_obs.batch_size)
         else:
             time_outs = torch.zeros_like(dones, device=self.device)
+
+        # Substitute the true terminal observation for timed-out envs so the critic bootstraps
+        # from the pre-reset state rather than the post-reset (auto-reset) observation. Only needed
+        # when a timeout is actually active this step; the env stashes ``time_outs_obs`` on reset steps.
+        if bool(time_outs.any()):
+            if "time_outs_obs" not in extras:
+                raise ValueError(
+                    "SAC: a timeout is active but 'time_outs_obs' is missing from extras; cannot "
+                    "bootstrap the truncated transition. Ensure the environment stashes pre-reset "
+                    "observations (time_outs_obs) whenever episodes reset."
+                )
+            time_outs_obs = extras["time_outs_obs"]
+            mask = time_outs.squeeze(-1).bool()
+            true_next_obs = {}
+            for key in time_outs_obs.keys():
+                leaf = next_obs[key]
+                # Broadcast the per-env mask over an arbitrary-rank leaf (e.g. flat [N, D] or
+                # height-scan [N, H, W]); mask[:, None] only works for rank-2 leaves.
+                leaf_mask = mask.reshape(mask.shape[0], *([1] * (leaf.ndim - 1)))
+                true_next_obs[key] = torch.where(leaf_mask, time_outs_obs[key], leaf)
+            true_next_obs = TensorDict(true_next_obs, batch_size=next_obs.batch_size)
+        else:
             true_next_obs = next_obs
 
         # Update normalizers
