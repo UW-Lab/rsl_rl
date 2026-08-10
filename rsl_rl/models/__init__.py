@@ -9,10 +9,13 @@ from .cnn_model import CNNModel
 from .encoder_model import MLPEncoderModel
 from .mlp_model import MLPModel
 from .rnn_model import RNNModel
+from .sac_mlp_model import SACActorModel, SACCriticModel
 
 __all__ = [
     "CNNModel",
     "MLPEncoderModel",
     "MLPModel",
     "RNNModel",
+    "SACActorModel",
+    "SACCriticModel",
 ]
