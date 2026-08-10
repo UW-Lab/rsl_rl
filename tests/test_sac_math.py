@@ -132,19 +132,20 @@ def test_gamma_mismatch_raises():
         SAC(actor, critic, rb, device="cpu", gamma=0.95)  # mismatch vs buffer 0.99
 
 
-def test_process_env_step_timeout_requires_obs():
-    import pytest
+def test_process_env_step_timeout_without_obs_degrades_to_terminal():
     import torch
-    from tensordict import TensorDict
+    # When a timeout is active but time_outs_obs is absent, SAC must NOT bootstrap from the
+    # post-reset observation; it degrades safely to terminal treatment (bootstrap flag zeroed).
     alg = _mk_sac("min")
     obs = _obs(n=4, dim=5)
     alg.act(obs)  # sets transition.observations/actions
     next_obs = _obs(n=4, dim=5)
-    dones = torch.zeros(4, 1)
-    # timeout active but no time_outs_obs -> must raise
-    extras = {"time_outs": torch.tensor([[0], [1], [0], [0]])}
-    with pytest.raises(ValueError):
-        alg.process_env_step(next_obs, torch.zeros(4, 1), dones, extras)
+    dones = torch.tensor([[0.0], [1.0], [0.0], [0.0]])
+    extras = {"time_outs": torch.tensor([[0], [1], [0], [0]])}  # timeout on env 1, no time_outs_obs
+    alg.process_env_step(next_obs, torch.zeros(4, 1), dones, extras)
+    # The stored bootstrap flag for the just-written transition must be all-zero (terminal treatment).
+    stored_bootstrap = alg.replay_buffer.bootstrap[:, alg.replay_buffer.step - 1]
+    assert torch.count_nonzero(stored_bootstrap) == 0
 
 
 def test_process_env_step_timeout_substitution_multidim():

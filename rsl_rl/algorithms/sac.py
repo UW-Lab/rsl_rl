@@ -212,22 +212,31 @@ class SAC:
         # from the pre-reset state rather than the post-reset (auto-reset) observation. Only needed
         # when a timeout is actually active this step; the env stashes ``time_outs_obs`` on reset steps.
         if bool(time_outs.any()):
-            if "time_outs_obs" not in extras:
-                raise ValueError(
-                    "SAC: a timeout is active but 'time_outs_obs' is missing from extras; cannot "
-                    "bootstrap the truncated transition. Ensure the environment stashes pre-reset "
-                    "observations (time_outs_obs) whenever episodes reset."
-                )
-            time_outs_obs = extras["time_outs_obs"]
-            mask = time_outs.squeeze(-1).bool()
-            true_next_obs = {}
-            for key in time_outs_obs.keys():
-                leaf = next_obs[key]
-                # Broadcast the per-env mask over an arbitrary-rank leaf (e.g. flat [N, D] or
-                # height-scan [N, H, W]); mask[:, None] only works for rank-2 leaves.
-                leaf_mask = mask.reshape(mask.shape[0], *([1] * (leaf.ndim - 1)))
-                true_next_obs[key] = torch.where(leaf_mask, time_outs_obs[key], leaf)
-            true_next_obs = TensorDict(true_next_obs, batch_size=next_obs.batch_size)
+            if "time_outs_obs" in extras:
+                time_outs_obs = extras["time_outs_obs"]
+                mask = time_outs.squeeze(-1).bool()
+                true_next_obs = {}
+                for key in time_outs_obs.keys():
+                    leaf = next_obs[key]
+                    # Broadcast the per-env mask over an arbitrary-rank leaf (e.g. flat [N, D] or
+                    # height-scan [N, H, W]); mask[:, None] only works for rank-2 leaves.
+                    leaf_mask = mask.reshape(mask.shape[0], *([1] * (leaf.ndim - 1)))
+                    true_next_obs[key] = torch.where(leaf_mask, time_outs_obs[key], leaf)
+                true_next_obs = TensorDict(true_next_obs, batch_size=next_obs.batch_size)
+            else:
+                # ``time_outs_obs`` is unavailable (e.g. the env-side pre-reset stash is not active in
+                # this installation). Bootstrapping from the post-reset observation would be wrong, so
+                # degrade safely to treating timeouts as true terminals (zero the bootstrap flag).
+                # Warn once so this silent-correctness loss is visible.
+                if not getattr(self, "_warned_missing_time_outs_obs", False):
+                    self._warned_missing_time_outs_obs = True
+                    print(
+                        "[WARNING] SAC: timeouts occurred but 'time_outs_obs' is absent from extras; "
+                        "treating timeouts as terminals (no bootstrap). Correct timeout bootstrapping "
+                        "requires the environment to stash pre-reset observations (time_outs_obs)."
+                    )
+                time_outs = torch.zeros_like(dones, device=self.device)
+                true_next_obs = next_obs
         else:
             true_next_obs = next_obs
 
