@@ -622,9 +622,24 @@ class SAC:
 
         robot = unwrapped_env.scene["robot"]
 
-        lower_limits = robot.data.soft_joint_pos_limits[0, :, 0].to(device)
-        upper_limits = robot.data.soft_joint_pos_limits[0, :, 1].to(device)
-        default_pos = robot.data.default_joint_pos[0].to(device)
+        # In newer IsaacLab (Newton/warp backend), articulation data are ``warp`` arrays rather than
+        # torch tensors. ``soft_joint_pos_limits`` is a ``wp.array`` of shape (num_envs, num_joints)
+        # with dtype ``wp.vec2f``, which resolves to a torch tensor of shape (num_envs, num_joints, 2).
+        # Convert to torch before indexing; tolerate either backend for forward/backward compatibility.
+        soft_limits = robot.data.soft_joint_pos_limits
+        default_joint_pos = robot.data.default_joint_pos
+        if not isinstance(soft_limits, torch.Tensor):
+            import warp as wp
+
+            soft_limits = wp.to_torch(soft_limits)
+        if not isinstance(default_joint_pos, torch.Tensor):
+            import warp as wp
+
+            default_joint_pos = wp.to_torch(default_joint_pos)
+
+        lower_limits = soft_limits[0, :, 0].to(device)
+        upper_limits = soft_limits[0, :, 1].to(device)
+        default_pos = default_joint_pos[0].to(device)
 
         if torch.isnan(lower_limits).any() or torch.isinf(lower_limits).any():
             raise ValueError("SAC: Found NaN or Inf in lower joint position limits.")
