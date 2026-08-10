@@ -25,16 +25,17 @@ class ReplayBuffer:
             self.__init__()
 
     def __init__(self, num_envs, num_transitions_per_env, obs, actions_shape, device, buffer_size, n_steps=1, gamma=0.99):
-        """
-        Initialize a ReplayBuffer object.
+        """Initialize a ReplayBuffer object.
+
         Args:
-            - dim (int or list of int): Dimension(s) of the data to be stored.
-                                    If a list, is stands for the dimensions of transition elements:
-                                    [obs_dim, action_dim, reward_dim, next_obs_dim, done_dim].
-            - buffer_size (int): Maximum size of buffer.
-            - device (torch.device): Device on which tensors are stored.
-            - n_steps (int): Number of steps for n-step returns (default: 1).
-            - gamma (float): Discount factor for n-step returns (default: 0.99).
+            num_envs: Number of parallel environments.
+            num_transitions_per_env: Number of transitions produced per environment step.
+            obs: A TensorDict of grouped observations used to determine storage shapes.
+            actions_shape: Shape of the action tensor for one transition.
+            device: Device on which the replay buffer tensors are stored.
+            buffer_size: Total capacity across environments; per-environment length is buffer_size // num_envs.
+            n_steps: Number of steps used for n-step returns.
+            gamma: Discount factor used for n-step returns.
         """
         self.buffer_size = buffer_size
         self.device = device
@@ -165,7 +166,7 @@ class ReplayBuffer:
                             num_inputs = ni
                         else:
                             assert num_inputs == ni, f"Mismatch in number of \
-                                    inputs inserted across TensorDict fields: {num_inputs} != {ni} for key {key}."
+                                    inputs inserted across buffer fields: {num_inputs} != {ni}."
                 else:
                     raise ValueError(f"Either replay buffer or input buffer contains None entries: r_buf={r_buf}, i_buf={i_buf}")
         else:

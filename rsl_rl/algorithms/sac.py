@@ -363,7 +363,7 @@ class SAC:
             else:
                 alpha_loss = torch.tensor(0.0, device=self.device)
 
-            entropy = self.log_alpha.exp().detach() * log_prob
+            alpha_logp = self.log_alpha.exp().detach() * log_prob  # alpha * log_prob (negative entropy term of the SAC actor loss)
 
             ###########################################################################
             # 3) Actor update
@@ -374,7 +374,7 @@ class SAC:
 
                 q1, q2 = self.critic.evaluate_all_q(obs_batch, new_actions)
                 q_new = self._combine_q(q1, q2)
-                actor_loss = (entropy - q_new).mean()
+                actor_loss = (alpha_logp - q_new).mean()
 
                 # Symmetry loss
                 if self.symmetry:
