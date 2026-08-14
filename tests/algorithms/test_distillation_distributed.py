@@ -87,8 +87,9 @@ def test_distillation_checkpoint_restores_update_clock() -> None:
     assert restored.num_updates == 37
 
 
-def test_split_runner_rejects_collective_unsafe_layout() -> None:
+def test_split_runner_rejects_collective_unsafe_layout(monkeypatch: pytest.MonkeyPatch) -> None:
     """An all-eval shuffled chunk can strand peers in gradient all-reduce."""
+    monkeypatch.setenv("WORLD_SIZE", "2")
 
     class FakeEnv:
         num_envs = 8

@@ -78,7 +78,8 @@ class DistillationRunnerSplit(DistillationRunner):
         if num_mini_batches <= 0:
             raise ValueError(f"num_mini_batches must be positive; got {num_mini_batches}")
         smallest_chunk = num_envs // num_mini_batches
-        if num_eval >= smallest_chunk:
+        is_distributed = int(os.getenv("WORLD_SIZE", "1")) > 1
+        if is_distributed and num_eval >= smallest_chunk:
             raise ValueError(
                 "Unsafe distributed DAgger split: an independently shuffled minibatch can be all-eval, "
                 "which would make ranks execute different gradient collectives. Require "
