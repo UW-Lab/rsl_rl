@@ -124,17 +124,34 @@ class DistillationDAggerWeighted(DistillationDAgger):
                 obs_full = batch.observations
                 priv_full = batch.privileged_actions
                 dones_full = batch.dones
-                # Minibatch SGD over the env dimension (PPO-style): split the batch
-                # into num_mini_batches env-chunks and take ONE gradient step per
-                # chunk. generator() yields envs in order, so the per-env eval_mask
-                # aligns and is sliced per chunk. num_mini_batches=1 -> single
-                # full-batch step (original behaviour).
+                # Minibatch SGD over train rows only. Keeping eval rows out of the
+                # shuffled chunks guarantees every rank executes the same gradient
+                # collectives even when the per-rank eval pool contains one row.
                 n_env = priv_full.shape[0]
+                if full_eval_mask is not None:
+                    train_indices = (~full_eval_mask).nonzero(as_tuple=False).view(-1)
+                    eval_indices = full_eval_mask.nonzero(as_tuple=False).view(-1)
+                else:
+                    train_indices = torch.arange(n_env, device=self.device)
+                    eval_indices = torch.empty(0, dtype=torch.long, device=self.device)
                 if self.num_mini_batches > 1:
-                    perm = torch.randperm(n_env, device=self.device)
+                    perm = train_indices[torch.randperm(train_indices.numel(), device=self.device)]
                     chunks = [c for c in perm.chunk(self.num_mini_batches) if c.numel() > 0]
                 else:
-                    chunks = [torch.arange(n_env, device=self.device)]
+                    chunks = [train_indices]
+
+                # Eval aux metrics remain no-grad and are computed once per epoch,
+                # independently of the training minibatch layout.
+                if aux_enabled and eval_indices.numel() > 0:
+                    eval_obs = obs_full[eval_indices]
+                    with torch.no_grad():
+                        _, _, eval_aux = self.policy.forward_all_heads(eval_obs)
+                        eval_targets = eval_obs[aux_target_group]
+                        dim_per_key = int(self.policy.aux_dim_per_key)
+                        for i, k in enumerate(aux_keys):
+                            lo, hi = i * dim_per_key, (i + 1) * dim_per_key
+                            sum_aux_eval[k] += F.mse_loss(eval_aux[k], eval_targets[..., lo:hi]).item()
+                    cnt_aux_eval += 1
 
                 for mb in chunks:
                     obs = obs_full[mb]

@@ -88,7 +88,7 @@ def test_distillation_checkpoint_restores_update_clock() -> None:
 
 
 def test_split_runner_rejects_collective_unsafe_layout(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An all-eval shuffled chunk can strand peers in gradient all-reduce."""
+    """Every distributed gradient chunk must contain at least one train row."""
     monkeypatch.setenv("WORLD_SIZE", "2")
 
     class FakeEnv:
@@ -96,9 +96,9 @@ def test_split_runner_rejects_collective_unsafe_layout(monkeypatch: pytest.Monke
 
     train_cfg = {
         "student_fraction": 0.5,
-        "eval_fraction": 0.5,
+        "eval_fraction": 0.875,
         "teacher_eval_fraction": 0.0,
         "algorithm": {"num_mini_batches": 2},
     }
-    with pytest.raises(ValueError, match="Unsafe distributed DAgger split"):
+    with pytest.raises(ValueError, match="fewer train rows than minibatches"):
         DistillationRunnerSplit(FakeEnv(), train_cfg, device="cpu")
