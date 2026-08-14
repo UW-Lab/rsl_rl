@@ -142,6 +142,18 @@ class DistillationDAggerWeighted(DistillationDAgger):
                     dones = dones_full[mb]
                     eval_mask = full_eval_mask[mb] if full_eval_mask is not None else None
                     train_mask = (~eval_mask) if eval_mask is not None else None
+                    local_train_rows = (
+                        int(train_mask.sum().item()) if train_mask is not None else int(mb.numel())
+                    )
+                    if self.is_multi_gpu:
+                        min_train_rows = torch.tensor(local_train_rows, device=self.device, dtype=torch.int64)
+                        torch.distributed.all_reduce(min_train_rows, op=torch.distributed.ReduceOp.MIN)
+                        if int(min_train_rows.item()) == 0:
+                            raise RuntimeError(
+                                "A distributed DAgger minibatch has no train rows on at least one rank. "
+                                "Increase the per-rank minibatch size or reduce eval_fraction so every "
+                                "rank executes the same gradient collectives."
+                            )
 
                     # Student forward. Single encoder pass returns (μ, σ, aux_pred);
                     # aux_pred is None when aux_enabled=False.
@@ -236,6 +248,19 @@ class DistillationDAggerWeighted(DistillationDAgger):
 
                     # One gradient step per minibatch chunk.
                     self.optimizer.zero_grad()
+                    if self.is_multi_gpu:
+                        finite_loss = torch.tensor(
+                            int(bool(torch.isfinite(step_loss.detach()).all().item())),
+                            device=self.device,
+                            dtype=torch.int32,
+                        )
+                        torch.distributed.all_reduce(finite_loss, op=torch.distributed.ReduceOp.MIN)
+                        if int(finite_loss.item()) == 0:
+                            raise FloatingPointError(
+                                "Non-finite distributed DAgger loss detected on at least one rank."
+                            )
+                    elif not bool(torch.isfinite(step_loss.detach()).all().item()):
+                        raise FloatingPointError("Non-finite DAgger loss detected.")
                     step_loss.backward()
                     if self.is_multi_gpu:
                         self.reduce_parameters()

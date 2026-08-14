@@ -168,6 +168,7 @@ class DistillationLegacy:
         return {
             "model_state_dict": self.policy.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
+            "num_updates": self.num_updates,
         }
 
     def load(self, loaded_dict: dict, load_cfg: dict | None, strict: bool) -> bool:
@@ -180,6 +181,8 @@ class DistillationLegacy:
                 self.policy.load_state_dict(state, strict=strict)
         if load_cfg.get("optimizer", True) and "optimizer_state_dict" in loaded_dict:
             self.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
+        if load_cfg.get("iteration", True):
+            self.num_updates = int(loaded_dict.get("num_updates", self.num_updates))
         return load_cfg.get("iteration", False)
 
     def get_policy(self):
@@ -210,15 +213,33 @@ class DistillationLegacy:
 
         This function is called after the backward pass to synchronize the gradients across all GPUs.
         """
-        # Create a tensor to store the gradients
-        grads = [param.grad.view(-1) for param in self.policy.parameters() if param.grad is not None]
+        trainable_params = [param for param in self.policy.parameters() if param.requires_grad]
+        grad_presence = torch.tensor(
+            [param.grad is not None for param in trainable_params],
+            dtype=torch.int32,
+            device=self.device,
+        )
+        grad_presence_min = grad_presence.clone()
+        grad_presence_max = grad_presence.clone()
+        torch.distributed.all_reduce(grad_presence_min, op=torch.distributed.ReduceOp.MIN)
+        torch.distributed.all_reduce(grad_presence_max, op=torch.distributed.ReduceOp.MAX)
+        if not torch.equal(grad_presence_min, grad_presence_max):
+            mismatched = (grad_presence_min != grad_presence_max).nonzero(as_tuple=False).view(-1).tolist()
+            raise RuntimeError(
+                "Distributed distillation produced a rank-dependent gradient set; "
+                f"parameter indices={mismatched}. All ranks must execute identical loss branches."
+            )
+
+        grads = [param.grad.view(-1) for param in trainable_params if param.grad is not None]
+        if not grads:
+            raise RuntimeError("Distributed distillation update produced no gradients on any rank.")
         all_grads = torch.cat(grads)
         # Average the gradients across all GPUs
         torch.distributed.all_reduce(all_grads, op=torch.distributed.ReduceOp.SUM)
         all_grads /= self.gpu_world_size
         # Update the gradients for all parameters with the reduced gradients
         offset = 0
-        for param in self.policy.parameters():
+        for param in trainable_params:
             if param.grad is not None:
                 numel = param.numel()
                 # Copy data back from shared buffer

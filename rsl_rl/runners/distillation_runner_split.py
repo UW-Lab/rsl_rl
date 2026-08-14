@@ -27,7 +27,6 @@ no-grad eval pool with OOD textures.
 from __future__ import annotations
 
 import os
-import statistics
 import time
 from collections import deque
 
@@ -75,6 +74,17 @@ class DistillationRunnerSplit(DistillationRunner):
         num_train = num_envs - num_eval
         num_student_train = round(num_train * self.student_fraction)
         num_teacher_train = num_train - num_student_train
+        num_mini_batches = int(train_cfg["algorithm"].get("num_mini_batches", 1))
+        if num_mini_batches <= 0:
+            raise ValueError(f"num_mini_batches must be positive; got {num_mini_batches}")
+        smallest_chunk = num_envs // num_mini_batches
+        if num_eval >= smallest_chunk:
+            raise ValueError(
+                "Unsafe distributed DAgger split: an independently shuffled minibatch can be all-eval, "
+                "which would make ranks execute different gradient collectives. Require "
+                f"num_eval ({num_eval}) < floor(num_envs / num_mini_batches) ({smallest_chunk}); "
+                "reduce eval_fraction or num_mini_batches."
+            )
 
         student_mask = torch.zeros(num_envs, dtype=torch.bool, device=device)
         student_mask[:num_student_eval] = True
@@ -301,51 +311,90 @@ class DistillationRunnerSplit(DistillationRunner):
                 policy_metrics=None,
             )
 
+            # Aggregate fixed-schema pool metrics across ranks before rank 0 logs
+            # them. This keeps W&B representative of the global rollout rather
+            # than rank 0's local simulator shard.
+            metric_buffers = {
+                "Metrics/success_student_train": self._student_train_success_buf,
+                "Metrics/success_teacher_train": self._teacher_train_success_buf,
+                "Metrics/success_student_eval": self._student_eval_success_buf,
+                "Metrics/success_teacher_eval": self._teacher_eval_success_buf,
+                "Metrics/bc_loss_student_eval": self._bc_loss_student_eval_buf,
+            }
+            for pool in ("student_train", "teacher_train", "student_eval", "teacher_eval"):
+                for tname in _bucket_names:
+                    metric_buffers[f"SuccessBucket/{pool}/{tname}"] = self._bucket_success[(pool, tname)]
+            packed_metrics = torch.tensor(
+                [
+                    value
+                    for buf in metric_buffers.values()
+                    for value in (float(sum(buf)), float(len(buf)))
+                ],
+                device=self.device,
+                dtype=torch.float64,
+            )
+            if self.is_distributed:
+                torch.distributed.all_reduce(packed_metrics, op=torch.distributed.ReduceOp.SUM)
+            global_metrics = {}
+            for index, name in enumerate(metric_buffers):
+                total = float(packed_metrics[2 * index].item())
+                count = float(packed_metrics[2 * index + 1].item())
+                if count > 0:
+                    global_metrics[name] = total / count
+
             # Append per-pool success metrics directly to the writer (the
             # standard logger pipeline doesn't carry an injection point for
             # arbitrary scalars after ``log`` returns).
             writer = self.logger.writer
             if writer is not None:
-                if self._student_train_success_buf:
-                    writer.add_scalar(
-                        "Metrics/success_student_train",
-                        statistics.mean(self._student_train_success_buf),
-                        it,
-                    )
-                if self._teacher_train_success_buf:
-                    writer.add_scalar(
-                        "Metrics/success_teacher_train",
-                        statistics.mean(self._teacher_train_success_buf),
-                        it,
-                    )
-                if self._student_eval_success_buf:
-                    writer.add_scalar(
-                        "Metrics/success_student_eval",
-                        statistics.mean(self._student_eval_success_buf),
-                        it,
-                    )
-                if self._teacher_eval_success_buf:
-                    writer.add_scalar(
-                        "Metrics/success_teacher_eval",
-                        statistics.mean(self._teacher_eval_success_buf),
-                        it,
-                    )
-                # Per-reset-bucket success (pool x strategy), e.g.
-                # SuccessBucket/student_train/start_assembled.
-                for (pool, tname), buf in self._bucket_success.items():
-                    if buf:
-                        writer.add_scalar(f"SuccessBucket/{pool}/{tname}", statistics.mean(buf), it)
-                if self._bc_loss_student_eval_buf:
-                    writer.add_scalar(
-                        "Metrics/bc_loss_student_eval",
-                        statistics.mean(self._bc_loss_student_eval_buf),
-                        it,
-                    )
+                for name, value in global_metrics.items():
+                    writer.add_scalar(name, value, it)
 
             # Save model
-            if self.logger.writer is not None and it % self.cfg["save_interval"] == 0:
-                self.save(os.path.join(self.logger.log_dir, f"model_{it}.pt"))  # type: ignore
+            if it % self.cfg["save_interval"] == 0:
+                agreement = self._distributed_agreement_diagnostics()
+                if writer is not None:
+                    for name, value in agreement.items():
+                        writer.add_scalar(f"Distributed/{name}", value, it)
+                    self.save(os.path.join(self.logger.log_dir, f"model_{it}.pt"))  # type: ignore
 
         if self.logger.writer is not None:
             self.save(os.path.join(self.logger.log_dir, f"model_{self.current_learning_iteration}.pt"))  # type: ignore
             self.logger.stop_logging_writer()
+
+    def _distributed_agreement_diagnostics(self) -> dict[str, float]:
+        """Return rank spreads for compact model/normalizer/update fingerprints."""
+        if not self.is_distributed:
+            return {
+                "parameter_checksum_spread": 0.0,
+                "normalizer_checksum_spread": 0.0,
+                "num_updates_spread": 0.0,
+            }
+
+        parameter_sum = torch.zeros((), device=self.device, dtype=torch.float64)
+        for parameter in self.alg.policy.parameters():
+            if parameter.requires_grad:
+                parameter_sum += parameter.detach().to(dtype=torch.float64).sum()
+        normalizer_sum = torch.zeros((), device=self.device, dtype=torch.float64)
+        for module in self.alg.policy.modules():
+            if hasattr(module, "_distributed_sync_enabled") and bool(module._distributed_sync_enabled):
+                normalizer_sum += module._mean.detach().to(dtype=torch.float64).sum()
+                normalizer_sum += module._var.detach().to(dtype=torch.float64).sum()
+                normalizer_sum += module.count.detach().to(dtype=torch.float64)
+        local = torch.stack(
+            (
+                parameter_sum,
+                normalizer_sum,
+                torch.tensor(float(self.alg.num_updates), device=self.device, dtype=torch.float64),
+            )
+        )
+        minimum = local.clone()
+        maximum = local.clone()
+        torch.distributed.all_reduce(minimum, op=torch.distributed.ReduceOp.MIN)
+        torch.distributed.all_reduce(maximum, op=torch.distributed.ReduceOp.MAX)
+        spread = (maximum - minimum).abs()
+        return {
+            "parameter_checksum_spread": float(spread[0].item()),
+            "normalizer_checksum_spread": float(spread[1].item()),
+            "num_updates_spread": float(spread[2].item()),
+        }

@@ -99,6 +99,7 @@ class DistillationDAgger(DistillationLegacy):
         eval_mask: torch.Tensor | None = None,
         aux_coeff: float = 1.0,
         teacher_sample: bool = False,
+        distributed_obs_normalization: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -110,6 +111,19 @@ class DistillationDAgger(DistillationLegacy):
             eval_mask = eval_mask.to(self.device).bool()
         self.eval_mask = eval_mask
         self.aux_coeff = float(aux_coeff)
+        self.distributed_obs_normalization = bool(distributed_obs_normalization)
+        if self.distributed_obs_normalization and self.is_multi_gpu:
+            synchronized_normalizers = 0
+            for module in self.policy.modules():
+                set_distributed_sync = getattr(module, "set_distributed_sync", None)
+                if callable(set_distributed_sync):
+                    set_distributed_sync(True)
+                    synchronized_normalizers += 1
+            if synchronized_normalizers == 0:
+                raise RuntimeError(
+                    "distributed_obs_normalization=True but the distillation policy "
+                    "contains no synchronizable observation normalizer."
+                )
         # When True, teacher actions during DAgger rollout are sampled from
         # N(mean, std) instead of taking the deterministic mean. Matches the
         # stochastic-policy regime the teacher was trained under in PPO. Requires
