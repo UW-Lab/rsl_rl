@@ -17,6 +17,16 @@ try:
 except ModuleNotFoundError:
     raise ModuleNotFoundError("wandb package is required to log to Weights and Biases.") from None
 
+_WANDB_RESUME_MODES = {"allow", "auto", "must", "never"}
+
+
+def _wandb_resume_mode() -> str:
+    """Return the validated W&B resume mode requested by the launcher."""
+    mode = os.environ.get("WANDB_RESUME", "allow")
+    if mode not in _WANDB_RESUME_MODES:
+        raise ValueError(f"WANDB_RESUME must be one of {sorted(_WANDB_RESUME_MODES)}, got {mode!r}.")
+    return mode
+
 
 class WandbSummaryWriter(SummaryWriter):
     """Summary writer for W&B."""
@@ -52,7 +62,7 @@ class WandbSummaryWriter(SummaryWriter):
         run_id = cfg.get("run_id")
         if run_id is not None:
             wandb_kwargs["id"] = str(run_id)
-            wandb_kwargs["resume"] = "allow"
+            wandb_kwargs["resume"] = _wandb_resume_mode()
         wandb.init(**wandb_kwargs)
 
         # Initialize set to keep track of logged videos
