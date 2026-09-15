@@ -1,0 +1,51 @@
+{
+  "commentTypes": [
+    "logic",
+    "syntax"
+  ],
+  "instructions": "Review against .greptile/rules.md and the current UW-Lab/rsl_rl implementation. Focus on concrete regressions introduced by the PR. Do not duplicate checks covered by the configured pre-commit hooks. Prioritize algorithm correctness, tensor shapes and devices, recurrent state, checkpoint compatibility, and distributed training. Be concise, explain the failing scenario, and include a code suggestion when the fix is local. Do not impose UWLab's simulator, task-registration, or extension-version rules on this standalone library.",
+  "ignorePatterns": "licenses/dependencies/**\nCONTRIBUTORS.md",
+  "rules": [
+    {
+      "id": "batched-tensor-operations",
+      "rule": "Keep rollout and learning tensors on the intended device with compatible shapes and dtypes. Flag unintended broadcasting, device mismatches, new Python loops over individual environments, and unnecessary CPU/NumPy round-trips in the training hot path. Loops over rollout time, epochs, minibatches, or recurrent sequences are intentional; scalar logging and adaptive scheduling may legitimately synchronize with the host.",
+      "severity": "high",
+      "scope": ["rsl_rl/**"]
+    },
+    {
+      "id": "rollout-and-loss-correctness",
+      "rule": "Preserve alignment of observations, actions, old log probabilities, values, rewards, dones, and minibatch indices. Keep rollout targets detached while retaining gradients for the policy/student and RND predictor updates. Check terminal masks, timeout bootstrapping, final-value bootstrapping, PPO clipping, and advantage normalization for concrete regressions. Symmetry augmentation must keep all augmented batch fields aligned; teacher and RND target networks must not accidentally train.",
+      "severity": "high",
+      "scope": ["rsl_rl/algorithms/**", "rsl_rl/storage/**", "rsl_rl/modules/**", "rsl_rl/runners/**"]
+    },
+    {
+      "id": "recurrent-state-boundaries",
+      "rule": "Recurrent changes must preserve trajectory ordering, padding masks, initial hidden states, and the intended gradient horizon. Reset hidden state for completed environments without erasing continuing environments, and detach at rollout or truncated-backpropagation boundaries as appropriate. Review both GRU tensor state and LSTM tuple state when changing shared memory code.",
+      "severity": "high",
+      "scope": ["rsl_rl/networks/**", "rsl_rl/modules/**", "rsl_rl/storage/**", "rsl_rl/algorithms/**"]
+    },
+    {
+      "id": "configuration-and-env-contract",
+      "rule": "Check changed runner, policy, and algorithm configuration keys against their consumers and config/example_config.yaml. Class names and callable strings must resolve through the existing imports and resolvers. Preserve the VecEnv TensorDict observation-group contract and the shapes and meaning of rewards, dones, and extras['time_outs']. Flag silently ignored options and breaking public configuration changes without migration guidance; do not require simulator-specific APIs in the core library.",
+      "severity": "high",
+      "scope": ["rsl_rl/**", "config/**"]
+    },
+    {
+      "id": "checkpoint-and-inference-compatibility",
+      "rule": "Changes to model state, normalization, or runner save/load must preserve supported checkpoint loading and training resume, or provide explicit migration guidance. Distinguish resuming training from loading a teacher or loading for inference. Respect load_optimizer and map_location, preserve required optimizer/iteration/RND state, and ensure inference uses the trained normalizers in evaluation mode on the requested device.",
+      "severity": "high",
+      "scope": ["rsl_rl/runners/**", "rsl_rl/modules/**", "rsl_rl/networks/**"]
+    },
+    {
+      "id": "distributed-training-consistency",
+      "rule": "Every rank must participate in matching distributed collectives in the same order with compatible tensors. Check gradient reduction and world-size scaling, parameter synchronization, device selection, and adaptive learning-rate changes for rank divergence or deadlocks. Keep logging and checkpoint side effects on the designated rank without putting required collectives behind that rank's guard. Preserve single-process execution.",
+      "severity": "high",
+      "scope": ["rsl_rl/algorithms/**", "rsl_rl/runners/**", "rsl_rl/networks/**", "rsl_rl/modules/**"]
+    },
+    {
+      "id": "portable-library-dependencies",
+      "rule": "Keep core library imports usable without Isaac Sim, UWLab, or an unselected optional logging backend. New dependencies belong in pyproject.toml with a reason for adding them. Respect the declared Python support range when adding runtime APIs. Flag new machine-specific filesystem paths, credentials, personal logging destinations, and committed training outputs; configurable example values and small intentional test fixtures are allowed.",
+      "severity": "medium"
+    }
+  ]
+}

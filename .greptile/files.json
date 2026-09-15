@@ -1,0 +1,28 @@
+{
+  "files": [
+    {
+      "path": "README.md",
+      "description": "Supported algorithms, installation, logging backends, and the fork's contribution conventions."
+    },
+    {
+      "path": ".pre-commit-config.yaml",
+      "description": "Configured lint, format, spelling, license, and repository-hygiene checks. Avoid repeating these checks in review."
+    },
+    {
+      "path": "ruff.toml",
+      "description": "Actual Ruff rules, ignored checks, import ordering, line length, and Python target."
+    },
+    {
+      "path": "pyproject.toml",
+      "description": "Authoritative package metadata, supported Python versions, and runtime dependencies."
+    },
+    {
+      "path": "config/example_config.yaml",
+      "description": "Public example of runner, policy, PPO, observation-group, RND, and symmetry configuration."
+    },
+    {
+      "path": "rsl_rl/env/vec_env.py",
+      "description": "Vectorized environment contract, TensorDict observation groups, tensor shapes, and timeout semantics."
+    }
+  ]
+}
