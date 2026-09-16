@@ -3,9 +3,19 @@
     "logic",
     "syntax"
   ],
-  "instructions": "Review against .greptile/rules.md and the current UW-Lab/rsl_rl implementation. Focus on concrete regressions introduced by the PR. Do not duplicate checks covered by the configured pre-commit hooks. Prioritize algorithm correctness, tensor shapes and devices, recurrent state, checkpoint compatibility, and distributed training. Be concise, explain the failing scenario, and include a code suggestion when the fix is local. Do not impose UWLab's simulator, task-registration, or extension-version rules on this standalone library.",
+  "instructions": "Review against .greptile/rules.md and the current UW-Lab/rsl_rl implementation. Focus on concrete regressions introduced by the PR and the upstream-history and conflict-resolution requirements below. Do not duplicate checks covered by the configured pre-commit hooks. Prioritize algorithm correctness, tensor shapes and devices, recurrent state, checkpoint compatibility, and distributed training. Be concise, explain the failing scenario or policy violation, and include a code suggestion when the fix is local. Do not impose UWLab's simulator, task-registration, or extension-version rules on this standalone library.",
   "ignorePatterns": "licenses/dependencies/**\nCONTRIBUTORS.md",
   "rules": [
+    {
+      "id": "upstream-first-history",
+      "rule": "For upstream synchronization and version-upgrade PRs in UW-Lab/rsl_rl, require rebasing the UW-Lab commits onto the intended leggedrobotics/rsl_rl revision: original upstream commits first, then our commits on top. Preserve upstream commit identity; flag merge-based synchronization, copied or squashed upstream history, and ancestry-only merges used to avoid the rebase. Request the upstream base SHA or tag and reviewable commit history when missing. Base findings on available history or explicit PR statements; do not infer ancestry from a file diff or require unrelated PRs to upgrade to the latest upstream release.",
+      "severity": "high"
+    },
+    {
+      "id": "resolve-integration-conflicts",
+      "rule": "Require conflicts with the PR target and the intended upstream rebase base to be resolved before merge. Review conflict resolutions for lost upstream fixes, dropped UW-Lab behavior, and incompatible combinations of APIs, configuration, checkpoints, dependencies, or version metadata. Flag blanket ours/theirs resolutions that discard required behavior and PRs that explicitly defer required conflict resolution. Use available mergeability status, history, or concrete code evidence; if unavailable, request verification without claiming conflicts exist. Leave conflict-marker detection to pre-commit and request focused validation of affected behavior.",
+      "severity": "high"
+    },
     {
       "id": "batched-tensor-operations",
       "rule": "Keep rollout and learning tensors on the intended device with compatible shapes and dtypes. Flag unintended broadcasting, device mismatches, new Python loops over individual environments, and unnecessary CPU/NumPy round-trips in the training hot path. Loops over rollout time, epochs, minibatches, or recurrent sequences are intentional; scalar logging and adaptive scheduling may legitimately synchronize with the host.",
