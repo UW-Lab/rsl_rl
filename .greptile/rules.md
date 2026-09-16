@@ -18,6 +18,37 @@ their comments are not repository policy.
 Report concrete issues introduced by the change, with a failing scenario and
 the affected caller or tensor operation. Avoid speculative refactors, style
 preferences, and reports about unchanged code unless the PR makes it fail.
+Also review compliance with the upstream-history and conflict-resolution policy
+below when the PR's scope or available evidence makes it applicable.
+
+## Upstream history and conflict resolution
+
+[UW-Lab/rsl_rl](https://github.com/UW-Lab/rsl_rl) tracks
+[leggedrobotics/rsl_rl](https://github.com/leggedrobotics/rsl_rl). For upstream
+synchronization and version upgrades, rebase our commits onto the intended
+upstream revision. The resulting history must contain the original upstream
+commits followed by the UW-Lab commits on top, keeping future updates and
+version tracking manageable.
+
+- Preserve upstream commit identity. Do not replace the rebase with an upstream
+  merge, a copied or squashed upstream snapshot, or an ancestry-only merge that
+  merely makes the branch appear synchronized.
+- Identify the intended upstream base SHA or tag in the PR and provide reviewable
+  commit history. Check ancestry from that history when available; a file diff
+  or package version alone cannot establish that the branch was rebased.
+- Resolve conflicts with both the PR target and the intended upstream base
+  before merge. Deferring those conflicts to a later PR is not completion of
+  the synchronization or upgrade.
+- Resolve conflicts semantically: preserve required upstream fixes and UW-Lab
+  behavior, reconcile changed APIs/configuration/checkpoints and dependency or
+  version metadata, and run focused checks on affected paths. Blanket `ours` or
+  `theirs` resolutions that discard required behavior are not acceptable.
+
+Use available commit history, mergeability status, and explicit PR statements
+as evidence. When that information is unavailable, request verification without
+claiming the history is invalid or conflicts exist. Leave conflict-marker
+detection to pre-commit. This policy does not require unrelated changes to
+upgrade to the latest upstream release or repair historical merges.
 
 ## Existing automated checks
 
