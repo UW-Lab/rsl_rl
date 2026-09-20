@@ -127,6 +127,55 @@ class TestEmpiricalNormalization:
         assert torch.allclose(norm.mean, expected.mean(dim=0))
         assert torch.allclose(norm.std, expected.std(dim=0, unbiased=False))
 
+    def test_forward_clips_normalized_outputs(self) -> None:
+        """Normalized outputs are clamped to [-clip, clip]; clip=None disables the clamp."""
+        norm = EmpiricalNormalization(shape=1, clip=10.0)
+        norm.train()
+        norm.update(torch.randn(1000, 1))
+
+        assert norm(torch.tensor([[1e4]])).item() == pytest.approx(10.0)
+        assert norm(torch.tensor([[-1e4]])).item() == pytest.approx(-10.0)
+
+        raw = EmpiricalNormalization(shape=1, clip=None)
+        raw.train()
+        raw.update(torch.randn(1000, 1))
+        assert raw(torch.tensor([[1e4]])).item() > 10.0
+
+    def test_winsorize_rejects_outliers_after_warmup(self) -> None:
+        """A single glitched sample must not inflate the running std once the warm-up is over."""
+        torch.manual_seed(0)
+        norm = EmpiricalNormalization(shape=1, outlier_clip=10.0, outlier_warmup=1000)
+        norm.train()
+        for _ in range(20):
+            norm.update(torch.randn(100, 1))
+        std_before = norm.std.clone()
+
+        glitch = torch.randn(100, 1)
+        glitch[0, 0] = 1e4
+        norm.update(glitch)
+
+        assert torch.allclose(norm.std, std_before, atol=0.05)
+        assert 0.0 < float(norm.last_outlier_frac) <= 0.01
+
+    def test_winsorize_inactive_during_warmup(self) -> None:
+        """Before ``outlier_warmup`` samples the moments are not trustworthy, so inputs enter unclipped."""
+        norm = EmpiricalNormalization(shape=1, outlier_clip=10.0, outlier_warmup=10_000)
+        norm.train()
+        norm.update(torch.randn(100, 1))
+        glitch = torch.zeros(100, 1)
+        glitch[0, 0] = 1e4
+        norm.update(glitch)
+
+        assert norm.std.item() > 100.0
+
+    def test_torchscript_export(self) -> None:
+        """forward() stays scriptable with and without the output clamp."""
+        for clip in (10.0, None):
+            norm = EmpiricalNormalization(shape=3, clip=clip)
+            scripted = torch.jit.script(norm)
+            x = torch.randn(5, 3) * 100
+            assert torch.allclose(scripted(x), norm(x))
+
 
 class TestEmpiricalDiscountedVariationNormalization:
     """Tests for ``EmpiricalDiscountedVariationNormalization``."""
