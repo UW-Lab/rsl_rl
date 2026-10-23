@@ -96,11 +96,17 @@ class TestEmpiricalNormalization:
         assert not torch.any(torch.isnan(norm._mean))
         assert not torch.any(torch.isnan(norm._std))
 
-    def test_distributed_update_combines_mean_and_variance(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize("outlier_warmup", [0, 1_000_000])
+    def test_distributed_update_combines_mean_and_variance(
+        self, monkeypatch: pytest.MonkeyPatch, outlier_warmup: int
+    ) -> None:
         """Distributed updates should match moments computed from samples on all ranks."""
-        norm = EmpiricalNormalization(shape=1)
+        norm = EmpiricalNormalization(shape=1, outlier_warmup=outlier_warmup)
         local_data = torch.tensor([[0.0], [2.0]])
         remote_data = torch.tensor([[10.0], [14.0], [18.0]])
+        if outlier_warmup == 0:
+            width = 10 * (1 + norm.eps)
+            remote_data = remote_data.clamp(-width, width)
         expected = torch.cat((local_data, remote_data))
         call_count = 0
 
