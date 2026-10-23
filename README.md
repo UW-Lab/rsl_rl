@@ -41,6 +41,21 @@ cd rsl_rl
 pip install -e .
 ```
 
+## UWLab integration
+
+The `codex/uw-v5.5.1` branch is based on upstream v5.5.1
+(`857de6165c5fd479726ec8ac5c9303a497766f30`). It retains three UW compatibility fixes:
+reuse an initialized distributed process group, skip vector normalization for
+image-only CNNs, and accept case-insensitive built-in logger aliases without
+changing custom writer names. Upstream already provides direct tensor broadcasts,
+non-mutating logger configuration, and the learning-rate resume fix.
+
+Regression coverage includes tensor parameters and normalization buffers for both
+actor/critic and RND predictor/target, repeated custom logger initialization,
+image-only CNNs, and distributed group reuse. CPU tests do not establish
+multi-GPU training or policy convergence. This branch uses the upstream 5.x
+separate actor/critic API; it does not restore legacy 3.x algorithms.
+
 ## Citation
 
 If you use RSL-RL in your research, please cite the [paper](https://arxiv.org/abs/2509.10771):

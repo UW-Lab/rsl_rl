@@ -224,3 +224,26 @@ class TestCNNModelONNXExport:
 
             assert [i.name for i in loaded.graph.input] == ["obs", "image"]
             assert [o.name for o in loaded.graph.output] == ["actions"]
+
+
+@pytest.mark.parametrize("obs_normalization", [False, True])
+def test_image_only_normalization_update_preserves_outputs(obs_normalization: bool) -> None:
+    """Normalization updates leave image-only models unchanged when no vector observations exist."""
+    obs = TensorDict({"image": torch.randn(NUM_ENVS, IMG_CHANNELS, IMG_H, IMG_W)}, batch_size=[NUM_ENVS])
+    model = CNNModel(
+        obs,
+        {"actor": ["image"]},
+        "actor",
+        NUM_ACTIONS,
+        hidden_dims=[32, 32],
+        obs_normalization=obs_normalization,
+        cnn_cfg={"image": CNN_CFG},
+    )
+    before = model(obs).detach().clone()
+
+    model.update_normalization(obs)
+
+    after = model(obs)
+    assert after.shape == (NUM_ENVS, NUM_ACTIONS)
+    assert torch.isfinite(after).all()
+    torch.testing.assert_close(after, before, rtol=0, atol=0)
