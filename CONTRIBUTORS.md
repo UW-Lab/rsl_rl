@@ -44,6 +44,7 @@ Please keep the lists sorted alphabetically.
 * Pascal Roth
 * Shaoshu Su
 * Shiqi Ren
+* Yanda Bao
 * Zeng Qingcheng
 * Zhang Chong
 * Ziqi Fan
