@@ -77,6 +77,8 @@ class Logger:
         """
         if self.log_dir is not None and not self.disable_logs:
             logger_cfg = self.cfg.get("logger", "tensorboard")
+            if isinstance(logger_cfg, str) and logger_cfg.lower() in {"tensorboard", "wandb", "neptune"}:
+                logger_cfg = logger_cfg.lower()
             writer_name = logger_cfg if isinstance(logger_cfg, str) else logger_cfg["class_name"]
 
             # Handle deprecated plain string logger types for W&B and Neptune

@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import torch
 from tensordict import TensorDict
+from typing import NoReturn
 
 import pytest
 
@@ -503,3 +504,32 @@ class TestSharedCNNEncoders:
         assert ppo.optimizer.state[shared]["step"] == 1
         # The first Adam step moves each parameter by the learning rate
         torch.testing.assert_close((before - shared.detach()).abs().max().item(), 1e-3, atol=1e-6, rtol=0)
+
+
+def test_broadcast_preserves_parameters_and_buffers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Broadcast tensor state without pickling or dropping normalizer buffers."""
+    from types import SimpleNamespace
+
+    ppo, _ = _build_ppo()
+    ppo._raw_actor.register_buffer("compat_mean", torch.zeros(1, OBS_DIM))
+    ppo._raw_critic.register_buffer("compat_count", torch.zeros((), dtype=torch.long))
+    ppo.rnd = SimpleNamespace(predictor=torch.nn.Linear(3, 2), target=torch.nn.Linear(3, 2))
+    ppo.rnd.predictor.register_buffer("compat_mean", torch.zeros(3))
+    models = [ppo._raw_actor, ppo._raw_critic, ppo.rnd.predictor, ppo.rnd.target]
+    expected = {value.data_ptr() for model in models for value in model.state_dict().values()}
+    observed = []
+
+    def broadcast(value: torch.Tensor, src: int) -> None:
+        assert src == 0
+        observed.append(value.data_ptr())
+        value.fill_(7)
+
+    def reject_pickle(*args: object, **kwargs: object) -> NoReturn:
+        raise AssertionError("Tensor broadcast must not pickle model state")
+
+    monkeypatch.setattr(torch.distributed, "broadcast", broadcast)
+    monkeypatch.setattr(torch.distributed, "broadcast_object_list", reject_pickle)
+    ppo.broadcast_parameters()
+    assert set(observed) == expected
+    assert len(observed) == len(expected)
+    assert all(torch.all(value == 7) for model in models for value in model.state_dict().values())

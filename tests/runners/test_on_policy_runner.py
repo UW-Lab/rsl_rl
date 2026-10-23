@@ -12,6 +12,7 @@ import pathlib
 import tempfile
 import torch
 from tensordict import TensorDict
+from typing import NoReturn
 
 import pytest
 
@@ -335,3 +336,23 @@ class TestLoggingWriterLifecycle:
         runner = OnPolicyRunner(DummyEnv(), cfg, log_dir=str(tmp_path), device="cpu")
         runner.learn(num_learning_iterations=2)
         assert runner.logger.writer.calls == ["stop"]
+
+
+def test_reuse_initialized_distributed_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Respect a process group already initialized by the environment launcher."""
+    runner = OnPolicyRunner.__new__(OnPolicyRunner)
+    runner.device = "cuda:1"
+    runner.cfg = {}
+    for name, value in (("WORLD_SIZE", "2"), ("LOCAL_RANK", "1"), ("RANK", "1")):
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    devices = []
+
+    def reject_initialization(*args: object, **kwargs: object) -> NoReturn:
+        raise AssertionError("Existing process group must not be initialized again")
+
+    monkeypatch.setattr(torch.distributed, "init_process_group", reject_initialization)
+    monkeypatch.setattr(torch.cuda, "set_device", devices.append)
+    runner._configure_multi_gpu()
+    assert devices == [1]
+    assert runner.is_distributed and runner.gpu_world_size == 2
