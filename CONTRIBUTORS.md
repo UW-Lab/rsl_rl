@@ -47,7 +47,6 @@ Please keep the lists sorted alphabetically.
 * Shantian Zhou
 * Shaoshu Su
 * Shiqi Ren
-* Yanda Bao
 * Yuguo Shan
 * Zeng Qingcheng
 * Zhang Chong
