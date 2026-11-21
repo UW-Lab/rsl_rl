@@ -10,6 +10,8 @@ from .distribution import BetaDistribution, Distribution, GaussianDistribution, 
 from .mlp import MLP
 from .normalization import EmpiricalDiscountedVariationNormalization, EmpiricalNormalization
 from .rnn import RNN, HiddenState
+from .student_teacher import StudentTeacher  # noqa: I001  (UW two-camera DAgger)
+from .student_teacher_vision import StudentTeacherVision
 
 __all__ = [
     "CNN",
@@ -22,4 +24,6 @@ __all__ = [
     "GaussianDistribution",
     "HeteroscedasticGaussianDistribution",
     "HiddenState",
+    "StudentTeacher",
+    "StudentTeacherVision",
 ]
